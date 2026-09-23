@@ -105,16 +105,25 @@ export const ElementalCodex: React.FC = () => {
                     </p>
                   </div>
 
-                  <div className="flex items-center justify-between text-xs text-slate-400">
-                    <span>Threshold: {currentTierInfo.minDays} - {currentTierInfo.maxDays > 1000 ? "∞" : currentTierInfo.maxDays} consecutive days</span>
-                    <span className="text-white font-medium">Live 60 FPS Particle Canvas Simulation</span>
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-2 text-xs">
+                    <div className="flex items-center gap-3">
+                      <span className="text-emerald-400 font-semibold">
+                        Daily Yield: +{currentTierInfo.energyReward}⚡
+                      </span>
+                      <span className="text-pink-400 font-semibold">
+                        Restore Cost: {currentTierInfo.restoreCost}⚡
+                      </span>
+                    </div>
+                    <span className="text-slate-400">
+                      Streak: {currentTierInfo.minDays}–{currentTierInfo.maxDays > 1000 ? "100+" : currentTierInfo.maxDays}d
+                    </span>
                   </div>
                 </div>
               </div>
 
               {/* Footer summary */}
               <div className="mt-4 rounded-xl border border-white/5 bg-black/30 p-3 text-xs text-slate-400">
-                <strong className="text-slate-200">Enforcement Rules:</strong> Tasks must be ignited between 00:00:00 and 23:59:59 local time. If missed past midnight, the streak resets to 0 and dissipates into extinguishing ash.
+                <strong className="text-slate-200">Cosmic Energy & Restoration Rules:</strong> Completing habits awards Cosmic Energy daily (+1 for Ember, +3 for Plasma, up to +50 for Supernova). If a streak is missed past midnight, you have a strict <span className="text-pink-300 font-semibold">1-day (24h) grace window</span> to rekindle it using your profile&apos;s Cosmic Energy!
               </div>
             </motion.div>
           </div>

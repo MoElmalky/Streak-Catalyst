@@ -4,28 +4,26 @@ import React from "react";
 import { Flame, Zap, Sun, Sparkles, Atom, CheckCircle2, Trophy, Activity } from "lucide-react";
 import { TaskWithStreak, StreakTier } from "@/types";
 import { STREAK_TIERS } from "@/lib/utils";
+import { useProfileQuery } from "@/hooks/useTasks";
 
 interface StatsOverviewProps {
   tasks: TaskWithStreak[];
 }
 
 export const StatsOverview: React.FC<StatsOverviewProps> = ({ tasks }) => {
+  const { data: profile } = useProfileQuery();
   const completedTodayCount = tasks.filter((t) => t.isCompletedToday).length;
   const maxStreakRecord = tasks.reduce(
     (max, t) => Math.max(max, t.streak.max_streak),
     0
   );
 
-  // Kinetic energy score
-  const totalCosmicEnergy = tasks.reduce((acc, t) => {
-    const s = t.streak.current_streak;
-    let weight = 1;
-    if (s >= 100) weight = 50;
-    else if (s >= 30) weight = 20;
-    else if (s >= 15) weight = 8;
-    else if (s >= 5) weight = 3;
-    return acc + s * weight;
-  }, 0);
+  // Calculate energy pending payout at midnight from today's completed tasks
+  const pendingEnergy = tasks
+    .filter((t) => t.isCompletedToday)
+    .reduce((sum, t) => sum + (t.tierInfo.energyReward || 0), 0);
+
+  const cosmicEnergyBalance = profile?.cosmic_energy ?? 0;
 
   // Group counts by tier
   const tierCounts: Record<StreakTier, number> = {
@@ -79,16 +77,18 @@ export const StatsOverview: React.FC<StatsOverviewProps> = ({ tasks }) => {
         </div>
 
         {/* Cosmic Energy */}
-        <div className="rounded-2xl border border-white/10 bg-catalyst-surface/60 p-4 backdrop-blur-xl">
+        <div className="rounded-2xl border border-pink-500/20 bg-catalyst-surface/60 p-4 backdrop-blur-xl shadow-glow-sm">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-400">Cosmic Kinetic Energy</span>
-            <Activity className="h-4 w-4 text-pink-400" />
+            <span className="text-xs font-semibold text-slate-400">Cosmic Energy</span>
+            <Zap className="h-4 w-4 text-pink-400 fill-pink-400/30 animate-pulse" />
           </div>
           <div className="mt-2 flex items-baseline gap-1.5">
-            <span className="text-2xl font-black text-white">{totalCosmicEnergy.toLocaleString()}</span>
-            <span className="text-xs text-slate-400">watts</span>
+            <span className="text-2xl font-black text-white">{cosmicEnergyBalance.toLocaleString()}</span>
+            <span className="text-xs text-pink-300 font-medium">units</span>
           </div>
-          <p className="mt-1 text-[11px] text-pink-300/80">Weighted multiplier score</p>
+          <p className="mt-1 text-[11px] text-pink-300/80">
+            +{pendingEnergy} queued for midnight payout
+          </p>
         </div>
 
         {/* Supernova Tasks */}

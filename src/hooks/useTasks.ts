@@ -1,17 +1,27 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { taskService } from "@/lib/services/taskService";
-import { TaskWithStreak, CreateTaskInput } from "@/types";
+import { profileService } from "@/lib/services/profileService";
+import { TaskWithStreak, CreateTaskInput, Profile } from "@/types";
 import { useCatalystStore } from "@/store/useCatalystStore";
 import { soundFX } from "@/lib/audio";
 import confetti from "canvas-confetti";
 
 export const TASKS_QUERY_KEY = ["catalyst-tasks"];
+export const PROFILE_QUERY_KEY = ["catalyst-profile"];
 
 export function useTasksQuery() {
   return useQuery<TaskWithStreak[]>({
     queryKey: TASKS_QUERY_KEY,
     queryFn: () => taskService.getTasks(),
     staleTime: 1000 * 60 * 5, // 5 minutes
+  });
+}
+
+export function useProfileQuery() {
+  return useQuery<Profile>({
+    queryKey: PROFILE_QUERY_KEY,
+    queryFn: () => profileService.getProfile(),
+    staleTime: 1000 * 60 * 2, // 2 minutes
   });
 }
 
@@ -129,6 +139,44 @@ export function useDeleteTask() {
   });
 }
 
+export function useRestoreStreak() {
+  const queryClient = useQueryClient();
+  const setFlaringTaskId = useCatalystStore((s) => s.setFlaringTaskId);
+
+  return useMutation({
+    mutationFn: (taskId: string) => taskService.restoreStreak(taskId),
+    onSuccess: (result, taskId) => {
+      soundFX.playRestoreStreak();
+      setFlaringTaskId(taskId);
+
+      // Cosmic revival particle shower
+      confetti({
+        particleCount: 50,
+        spread: 80,
+        origin: { y: 0.6 },
+        colors: ["#c084fc", "#ec4899", "#38bdf8", "#fbbf24"],
+      });
+
+      setTimeout(() => {
+        setFlaringTaskId(null);
+      }, 1500);
+
+      // Update cached profile energy immediately
+      queryClient.setQueryData<Profile>(PROFILE_QUERY_KEY, (prev) => {
+        if (!prev) return prev;
+        return { ...prev, cosmic_energy: result.remainingEnergy };
+      });
+
+      queryClient.invalidateQueries({ queryKey: TASKS_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: PROFILE_QUERY_KEY });
+    },
+    onError: (err: any) => {
+      soundFX.playFizzle();
+      console.error("Streak restore error:", err?.message || err);
+    },
+  });
+}
+
 export function useMidnightEnforcement() {
   const queryClient = useQueryClient();
   const setFizzlingTaskId = useCatalystStore((s) => s.setFizzlingTaskId);
@@ -144,6 +192,7 @@ export function useMidnightEnforcement() {
         soundFX.playClick();
       }
       queryClient.invalidateQueries({ queryKey: TASKS_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: PROFILE_QUERY_KEY });
     },
   });
 }

@@ -14,12 +14,14 @@ import {
   Clock,
   MoreVertical,
   TrendingUp,
+  RotateCcw,
+  AlertTriangle,
 } from "lucide-react";
 import { TaskWithStreak, StreakTier } from "@/types";
 import { ElementalCanvas } from "@/components/elemental/ElementalCanvas";
-import { getFormattedTimeUntilMidnight } from "@/lib/utils";
+import { getFormattedTimeUntilMidnight, isStreakRestorable, STREAK_TIERS } from "@/lib/utils";
 import { useCatalystStore } from "@/store/useCatalystStore";
-import { useToggleTaskComplete, useDeleteTask } from "@/hooks/useTasks";
+import { useToggleTaskComplete, useDeleteTask, useProfileQuery, useRestoreStreak } from "@/hooks/useTasks";
 
 interface TaskCardProps {
   task: TaskWithStreak;
@@ -30,8 +32,14 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task }) => {
   const flaringTaskId = useCatalystStore((s) => s.flaringTaskId);
   const fizzlingTaskId = useCatalystStore((s) => s.fizzlingTaskId);
 
+  const { data: profile } = useProfileQuery();
   const toggleMutation = useToggleTaskComplete();
   const deleteMutation = useDeleteTask();
+  const restoreMutation = useRestoreStreak();
+
+  const restorableStatus = isStreakRestorable(task.streak);
+  const userEnergy = profile?.cosmic_energy ?? 0;
+  const hasEnoughEnergy = userEnergy >= restorableStatus.cost;
 
   const isFlaring = flaringTaskId === task.id;
   const isFizzling = fizzlingTaskId === task.id;
@@ -219,6 +227,34 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task }) => {
           </div>
         </div>
 
+        {/* Broken Streak Restorable Alert Banner (< 24h grace window) */}
+        {restorableStatus.canRestore && (
+          <div className="mt-3.5 rounded-xl border border-pink-500/30 bg-pink-950/40 p-2.5 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-1 text-xs">
+              <span className="flex items-center gap-1.5 font-bold text-pink-300">
+                <AlertTriangle className="h-3.5 w-3.5 text-pink-400 shrink-0" />
+                <span>Broken Streak: {restorableStatus.targetStreak}d ({STREAK_TIERS[restorableStatus.targetTier].name})</span>
+              </span>
+              <span className="text-[10px] font-semibold text-pink-200 bg-pink-500/20 px-2 py-0.5 rounded-full border border-pink-500/30">
+                {restorableStatus.hoursLeft}h {restorableStatus.minutesLeft}m left
+              </span>
+            </div>
+            <p className="mt-1 text-[11px] text-pink-300/80">
+              Restore this streak using {restorableStatus.cost} Cosmic Energy (Available: {userEnergy}).
+            </p>
+          </div>
+        )}
+
+        {/* Expired Broken Streak Banner (> 24h) */}
+        {!restorableStatus.canRestore && task.streak.current_streak === 0 && (task.streak.broken_streak ?? 0) > 0 && (
+          <div className="mt-3.5 rounded-xl border border-slate-700/60 bg-slate-900/50 p-2.5 backdrop-blur-md">
+            <div className="flex items-center gap-1.5 text-xs text-slate-400">
+              <AlertTriangle className="h-3.5 w-3.5 text-slate-500 shrink-0" />
+              <span>Previous {task.streak.broken_streak}d streak expired (&gt;1 day). Ignite to restart!</span>
+            </div>
+          </div>
+        )}
+
         {/* Evolution Progress Bar */}
         <div className="mt-3.5">
           <div className="flex items-center justify-between text-[11px] text-slate-400">
@@ -242,36 +278,62 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task }) => {
         </div>
       </div>
 
-      {/* Bottom Action Row: Local Midnight Timer & Complete Button */}
-      <div className="relative z-10 mt-5 flex items-center justify-between border-t border-white/5 pt-4">
+      {/* Bottom Action Row: Local Midnight Timer & Complete / Restore Buttons */}
+      <div className="relative z-10 mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-white/5 pt-4">
         <div className="flex items-center gap-1.5 text-xs text-slate-400">
           <Clock className="h-3.5 w-3.5 text-slate-500" />
           <span>{getFormattedTimeUntilMidnight()}</span>
         </div>
 
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.94 }}
-          onClick={() => toggleMutation.mutate(task.id)}
-          disabled={toggleMutation.isPending}
-          className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold tracking-wide transition-all duration-300 ${
-            task.isCompletedToday
-              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30"
-              : "bg-white text-black hover:bg-slate-200 shadow-glow-sm"
-          }`}
-        >
-          {task.isCompletedToday ? (
-            <>
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-              Ignited Today!
-            </>
-          ) : (
-            <>
-              <Circle className="h-4 w-4 text-black" />
-              Ignite Catalyst
-            </>
+        <div className="flex items-center gap-2">
+          {/* Restore Streak Button when restorable within 1 day */}
+          {restorableStatus.canRestore && (
+            <motion.button
+              whileHover={hasEnoughEnergy ? { scale: 1.04 } : {}}
+              whileTap={hasEnoughEnergy ? { scale: 0.94 } : {}}
+              onClick={() => restoreMutation.mutate(task.id)}
+              disabled={!hasEnoughEnergy || restoreMutation.isPending}
+              className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold tracking-wide transition-all duration-300 ${
+                hasEnoughEnergy
+                  ? "bg-gradient-to-r from-pink-500 to-purple-600 text-white shadow-glow-tier4 hover:from-pink-400 hover:to-purple-500 border border-pink-400/40"
+                  : "bg-slate-800/80 text-slate-400 border border-slate-700/50 cursor-not-allowed"
+              }`}
+              title={
+                hasEnoughEnergy
+                  ? `Restore ${restorableStatus.targetStreak}-day streak for ${restorableStatus.cost} Cosmic Energy`
+                  : `Requires ${restorableStatus.cost} Cosmic Energy (You have ${userEnergy})`
+              }
+            >
+              <RotateCcw className={`h-3.5 w-3.5 ${restoreMutation.isPending ? "animate-spin" : ""}`} />
+              <span>Restore ({restorableStatus.cost}⚡)</span>
+            </motion.button>
           )}
-        </motion.button>
+
+          {/* Ignite Button */}
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.94 }}
+            onClick={() => toggleMutation.mutate(task.id)}
+            disabled={toggleMutation.isPending}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold tracking-wide transition-all duration-300 ${
+              task.isCompletedToday
+                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30"
+                : "bg-white text-black hover:bg-slate-200 shadow-glow-sm"
+            }`}
+          >
+            {task.isCompletedToday ? (
+              <>
+                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                Ignited Today!
+              </>
+            ) : (
+              <>
+                <Circle className="h-4 w-4 text-black" />
+                Ignite Catalyst
+              </>
+            )}
+          </motion.button>
+        </div>
       </div>
     </motion.div>
   );

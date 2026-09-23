@@ -1,10 +1,17 @@
 import { TaskWithStreak, CreateTaskInput, Task, Streak } from "@/types";
-import { getStreakTier, STREAK_TIERS, isCompletedToday, isCompletedYesterday } from "@/lib/utils";
+import {
+  getStreakTier,
+  STREAK_TIERS,
+  isCompletedToday,
+  isCompletedYesterday,
+  isStreakRestorable,
+  getStreakRestoreCost,
+} from "@/lib/utils";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/client";
 import { profileService } from "@/lib/services/profileService";
 
-const LOCAL_STORAGE_KEY = "catalyst_tasks_data_v1";
+const LOCAL_STORAGE_KEY = "catalyst_tasks_data_v2";
 
 const INITIAL_MOCK_DATA: TaskWithStreak[] = [
   {
@@ -119,9 +126,33 @@ const INITIAL_MOCK_DATA: TaskWithStreak[] = [
       task_id: "task-dormant-6",
       user_id: "demo-user",
       current_streak: 0,
-      max_streak: 0,
-      last_completed_at: null,
+      max_streak: 8,
+      last_completed_at: new Date(Date.now() - 2 * 86400000).toISOString(),
       updated_at: new Date().toISOString(),
+      broken_streak: 8, // Tier 2 Plasma Burst broken streak!
+      broken_at: new Date(Date.now() - 8 * 3600000).toISOString(), // Broken 8 hours ago (restorable within 24h grace window)
+    },
+    isCompletedToday: false,
+    tier: "tier0",
+    tierInfo: STREAK_TIERS.tier0,
+  },
+  {
+    id: "task-expired-7",
+    user_id: "demo-user",
+    title: "Speed Typing & Coding Kata",
+    description: "Daily 30-minute touch typing drills and algorithms practice.",
+    category: "craft",
+    created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+    streak: {
+      id: "streak-7",
+      task_id: "task-expired-7",
+      user_id: "demo-user",
+      current_streak: 0,
+      max_streak: 18,
+      last_completed_at: new Date(Date.now() - 4 * 86400000).toISOString(),
+      updated_at: new Date().toISOString(),
+      broken_streak: 18, // Tier 3 Solar Flare broken streak
+      broken_at: new Date(Date.now() - 36 * 3600000).toISOString(), // Broken 36 hours ago (window expired > 1 day)
     },
     isCompletedToday: false,
     tier: "tier0",
@@ -461,30 +492,150 @@ export const taskService = {
     saveLocalStore(filtered);
   },
 
-  async triggerMidnightEnforcement(): Promise<{ resetTasks: string[]; count: number }> {
+  async restoreStreak(taskId: string): Promise<{ task: TaskWithStreak; remainingEnergy: number }> {
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (user) {
+          // Attempt using the database function restore_task_streak
+          const { data: rpcResult, error: rpcError } = await supabase.rpc("restore_task_streak", {
+            p_task_id: taskId,
+          });
+
+          if (!rpcError && rpcResult) {
+            const { data: updatedTask } = await supabase
+              .from("tasks")
+              .select("*, streaks(*)")
+              .eq("id", taskId)
+              .single();
+
+            if (updatedTask) {
+              const streakData = Array.isArray(updatedTask.streaks) ? updatedTask.streaks[0] : updatedTask.streaks;
+              return {
+                task: enrichTaskWithStreak(updatedTask, streakData),
+                remainingEnergy: Number(rpcResult.remaining_energy ?? 0),
+              };
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Supabase restoreStreak RPC error, falling back to local handler:", err);
+      }
+    }
+
+    // Guest / Local store handler
+    const list = getLocalStore();
+    const index = list.findIndex((t) => t.id === taskId);
+    if (index === -1) throw new Error("Task not found");
+
+    const item = list[index];
+    const status = isStreakRestorable(item.streak);
+    if (!status.canRestore) {
+      throw new Error(status.reason || "Streak cannot be restored");
+    }
+
+    // Deduct Cosmic Energy from profile
+    const remainingEnergy = await profileService.spendCosmicEnergy(status.cost);
+
+    // Restore streak
+    const restoredStreak: Streak = {
+      ...item.streak,
+      current_streak: status.targetStreak,
+      max_streak: Math.max(item.streak.max_streak, status.targetStreak),
+      broken_streak: null,
+      broken_at: null,
+      last_completed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const updatedTask = enrichTaskWithStreak(item, restoredStreak);
+    list[index] = updatedTask;
+    saveLocalStore(list);
+
+    return { task: updatedTask, remainingEnergy };
+  },
+
+  async triggerMidnightEnforcement(): Promise<{ resetTasks: string[]; count: number; energyAwarded: number }> {
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (user) {
+          await supabase.rpc("process_end_of_day_catalyst", { target_user_id: user.id });
+        }
+      } catch (e) {
+        console.warn("Supabase end of day catalyst RPC error:", e);
+      }
+    }
+
     const list = getLocalStore();
     const resetTasks: string[] = [];
+    let totalEarnedEnergy = 0;
 
     const updatedList = list.map((item) => {
       const lastCompleted = item.streak.last_completed_at;
+      const isCompleted = isCompletedToday(lastCompleted);
+
+      // 1. If completed today: award Cosmic Energy based on tier & update max streak
+      if (isCompleted && item.streak.current_streak > 0) {
+        const tier = getStreakTier(item.streak.current_streak);
+        const reward = STREAK_TIERS[tier].energyReward;
+        totalEarnedEnergy += reward;
+
+        const newMax = Math.max(item.streak.max_streak, item.streak.current_streak);
+        return enrichTaskWithStreak(item, {
+          ...item.streak,
+          max_streak: newMax,
+          updated_at: new Date().toISOString(),
+        });
+      }
+
+      // 2. If NOT completed today or yesterday: break the streak and record broken_at
       if (item.streak.current_streak > 0) {
-        const completedToday = isCompletedToday(lastCompleted);
         const completedYesterday = isCompletedYesterday(lastCompleted);
 
-        if (!completedToday && !completedYesterday) {
+        if (!isCompleted && !completedYesterday) {
           resetTasks.push(item.id);
-          const zeroStreak: Streak = {
+          const brokenStreak: Streak = {
             ...item.streak,
+            broken_streak: item.streak.current_streak,
+            broken_at: new Date().toISOString(),
             current_streak: 0,
             updated_at: new Date().toISOString(),
           };
-          return enrichTaskWithStreak(item, zeroStreak);
+          return enrichTaskWithStreak(item, brokenStreak);
         }
       }
+
+      // 3. Clear expired broken streaks (> 24 hours)
+      if (item.streak.broken_streak && item.streak.broken_at) {
+        const elapsed = Date.now() - new Date(item.streak.broken_at).getTime();
+        if (elapsed > 24 * 3600 * 1000) {
+          return enrichTaskWithStreak(item, {
+            ...item.streak,
+            broken_streak: null,
+            broken_at: null,
+            updated_at: new Date().toISOString(),
+          });
+        }
+      }
+
       return item;
     });
 
+    // Credit Cosmic Energy to profile
+    if (totalEarnedEnergy > 0) {
+      await profileService.addCosmicEnergy(totalEarnedEnergy);
+    }
+
     saveLocalStore(updatedList);
-    return { resetTasks, count: resetTasks.length };
+    return { resetTasks, count: resetTasks.length, energyAwarded: totalEarnedEnergy };
   },
 };

@@ -8,17 +8,20 @@ import {
   User,
   UserCheck,
   Moon,
+  Zap,
 } from "lucide-react";
 import { useCatalystStore } from "@/store/useCatalystStore";
 import { getFormattedTimeUntilMidnight } from "@/lib/utils";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/client";
 import { profileService } from "@/lib/services/profileService";
+import { useProfileQuery } from "@/hooks/useTasks";
 
 export const Header: React.FC = () => {
   const isAudioMuted = useCatalystStore((s) => s.isAudioMuted);
   const toggleAudioMute = useCatalystStore((s) => s.toggleAudioMute);
   const setAuthModalOpen = useCatalystStore((s) => s.setAuthModalOpen);
+  const { data: profile } = useProfileQuery();
 
   const [timeLeft, setTimeLeft] = useState("");
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -87,6 +90,18 @@ export const Header: React.FC = () => {
 
         {/* Action Controls */}
         <div className="flex items-center gap-2 sm:gap-3">
+          {/* Cosmic Energy Balance Pill */}
+          <div
+            className="flex items-center gap-1.5 rounded-full border border-pink-500/40 bg-pink-950/40 px-3 py-1 text-xs text-pink-300 backdrop-blur-md shadow-glow-sm"
+            title="Spendable Cosmic Energy. Used to restore lost streaks within 1 day."
+          >
+            <Zap className="h-3.5 w-3.5 text-pink-400 fill-pink-400/40 animate-pulse" />
+            <span className="font-black text-white tracking-wide">
+              {profile?.cosmic_energy?.toLocaleString() ?? 0}
+            </span>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-pink-400/80">Energy</span>
+          </div>
+
           {/* Midnight Countdown pill with detected local timezone */}
           <div
             className="hidden md:flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-300 backdrop-blur-md"

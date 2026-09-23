@@ -13,12 +13,15 @@ export interface StreakTierInfo {
   badgeText: string;
   accentColor: string;
   particleColors: string[];
+  restoreCost: number;
+  energyReward: number;
 }
 
 export interface Profile {
   id: string;
   email: string;
   timezone: string;
+  cosmic_energy: number;
   created_at: string;
 }
 
@@ -39,6 +42,8 @@ export interface Streak {
   max_streak: number;
   last_completed_at: string | null;
   updated_at: string;
+  broken_streak?: number | null;
+  broken_at?: string | null;
 }
 
 export interface TaskWithStreak extends Task {
