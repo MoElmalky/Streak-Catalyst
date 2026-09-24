@@ -49,7 +49,6 @@ export function useToggleTaskComplete() {
                 streak: {
                   ...item.streak,
                   current_streak: newStreak,
-                  max_streak: Math.max(item.streak.max_streak, newStreak),
                 },
               };
             }

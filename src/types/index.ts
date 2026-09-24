@@ -22,6 +22,7 @@ export interface Profile {
   email: string;
   timezone: string;
   cosmic_energy: number;
+  last_eod_date?: string | null;
   created_at: string;
 }
 

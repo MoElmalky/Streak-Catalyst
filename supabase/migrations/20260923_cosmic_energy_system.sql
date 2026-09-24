@@ -1,14 +1,16 @@
 -- ==============================================================================
--- Cosmic Energy & Streak Restoration Migration
--- 1. Adds cosmic_energy to profiles
--- 2. Adds broken_streak & broken_at tracking to streaks
--- 3. Function: process_end_of_day_catalyst (calculates tier energy & updates highest streak)
+-- Cosmic Energy & Streak Restoration Migration (Hourly Midnight Processing)
+-- 1. Profiles: Add cosmic_energy balance & last_eod_date for idempotency
+-- 2. Streaks: Add broken_streak & broken_at timestamp for 1-day restore window
+-- 3. Function: process_end_of_day_catalyst (runs hourly, processes users whose local day just ended)
 -- 4. Function: restore_task_streak (restores broken streak with 1-day grace window)
+-- 5. Cron: Schedules process_end_of_day_catalyst to run every hour at minute 0
 -- ==============================================================================
 
--- 1. Profiles: Add cosmic_energy balance
+-- 1. Profiles: Add cosmic_energy balance and last_eod_date
 ALTER TABLE IF EXISTS profiles
-ADD COLUMN IF NOT EXISTS cosmic_energy BIGINT NOT NULL DEFAULT 0;
+ADD COLUMN IF NOT EXISTS cosmic_energy BIGINT NOT NULL DEFAULT 0,
+ADD COLUMN IF NOT EXISTS last_eod_date DATE DEFAULT NULL;
 
 -- 2. Streaks: Add broken_streak and broken_at timestamp for 1-day restore window
 ALTER TABLE IF EXISTS streaks
@@ -16,8 +18,12 @@ ADD COLUMN IF NOT EXISTS broken_streak INT DEFAULT NULL,
 ADD COLUMN IF NOT EXISTS broken_at TIMESTAMPTZ DEFAULT NULL;
 
 -- 3. End-of-Day Database Function
--- Can be called via pg_cron at midnight, or invoked on demand per user
-CREATE OR REPLACE FUNCTION process_end_of_day_catalyst(target_user_id UUID DEFAULT NULL)
+-- Runs exclusively on the database via hourly cron.
+-- Automatically filters users whose local time is currently in the midnight hour (00:00 - 00:59).
+DROP FUNCTION IF EXISTS process_end_of_day_catalyst(UUID, BOOLEAN);
+DROP FUNCTION IF EXISTS process_end_of_day_catalyst(UUID);
+
+CREATE OR REPLACE FUNCTION process_end_of_day_catalyst()
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -25,39 +31,59 @@ AS $$
 DECLARE
   v_user RECORD;
   v_user_tz TEXT;
-  v_today_date DATE;
-  v_yesterday_date DATE;
+  v_local_now TIMESTAMP;
+  v_ended_date DATE;
   v_total_energy_earned INT := 0;
   v_task_reward INT := 0;
   v_streak RECORD;
-  v_reset_count INT := 0;
-  v_completed_count INT := 0;
+  v_users_processed INT := 0;
+  v_total_tasks_completed INT := 0;
+  v_total_energy_distributed INT := 0;
+  v_total_streaks_reset INT := 0;
 BEGIN
-  -- Iterate through target user or all users
+  -- Only process users whose local time is currently in the midnight hour (00:00 - 00:59)
   FOR v_user IN
-    SELECT id, COALESCE(timezone, 'UTC') as timezone, cosmic_energy
+    SELECT
+      id,
+      COALESCE(timezone, 'UTC') as timezone,
+      COALESCE(cosmic_energy, 0) as cosmic_energy,
+      last_eod_date
     FROM profiles
-    WHERE (target_user_id IS NULL OR id = target_user_id)
+    WHERE EXTRACT(HOUR FROM (NOW() AT TIME ZONE COALESCE(timezone, 'UTC'))) = 0
   LOOP
+    -- Safely resolve user's local time with fallback to UTC
     v_user_tz := v_user.timezone;
-    v_today_date := (NOW() AT TIME ZONE v_user_tz)::DATE;
-    v_yesterday_date := v_today_date - INTERVAL '1 day';
+    BEGIN
+      v_local_now := (NOW() AT TIME ZONE v_user_tz);
+    EXCEPTION WHEN OTHERS THEN
+      v_user_tz := 'UTC';
+      v_local_now := (NOW() AT TIME ZONE 'UTC');
+    END;
+
+    -- In the midnight hour (00:00 - 00:59), the concluded day is yesterday in local time
+    v_ended_date := (v_local_now::DATE - INTERVAL '1 day')::DATE;
+
+    -- Idempotency check: Skip if user was already processed for this concluded date
+    IF v_user.last_eod_date IS NOT NULL AND v_user.last_eod_date >= v_ended_date THEN
+      CONTINUE;
+    END IF;
+
     v_total_energy_earned := 0;
 
-    -- Process tasks completed today: Award Tier Energy & Update Highest Streak
+    -- 1. Tasks completed on the concluded day: Award Tier Energy & Update Highest Streak
     FOR v_streak IN
       SELECT s.id, s.current_streak, s.max_streak, s.last_completed_at
       FROM streaks s
       WHERE s.user_id = v_user.id
         AND s.last_completed_at IS NOT NULL
-        AND (s.last_completed_at AT TIME ZONE v_user_tz)::DATE = v_today_date
+        AND (s.last_completed_at AT TIME ZONE v_user_tz)::DATE = v_ended_date
     LOOP
       -- Calculate Cosmic Energy based on tier achieved:
-      -- Tier 1 (1-4): 1
-      -- Tier 2 (5-14): 3
-      -- Tier 3 (15-29): 8
-      -- Tier 4 (30-99): 20
-      -- Tier 5 (100+): 50
+      -- Tier 1 (1-4): +1 Energy
+      -- Tier 2 (5-14): +3 Energy
+      -- Tier 3 (15-29): +8 Energy
+      -- Tier 4 (30-99): +20 Energy
+      -- Tier 5 (100+): +50 Energy
       IF v_streak.current_streak >= 100 THEN
         v_task_reward := 50;
       ELSIF v_streak.current_streak >= 30 THEN
@@ -73,7 +99,7 @@ BEGIN
       END IF;
 
       v_total_energy_earned := v_total_energy_earned + v_task_reward;
-      v_completed_count := v_completed_count + 1;
+      v_total_tasks_completed := v_total_tasks_completed + 1;
 
       -- Update highest streak record (max_streak) in the same function
       UPDATE streaks
@@ -82,14 +108,7 @@ BEGIN
       WHERE id = v_streak.id;
     END LOOP;
 
-    -- Credit accumulated Cosmic Energy to the user profile
-    IF v_total_energy_earned > 0 THEN
-      UPDATE profiles
-      SET cosmic_energy = cosmic_energy + v_total_energy_earned
-      WHERE id = v_user.id;
-    END IF;
-
-    -- Process tasks NOT completed today or yesterday: Break streak with 1-day grace window
+    -- 2. Tasks NOT completed on the concluded day: Break streak and record broken_at timestamp (1-day grace window)
     FOR v_streak IN
       SELECT s.id, s.current_streak, s.last_completed_at
       FROM streaks s
@@ -97,7 +116,7 @@ BEGIN
         AND s.current_streak > 0
         AND (
           s.last_completed_at IS NULL
-          OR (s.last_completed_at AT TIME ZONE v_user_tz)::DATE < v_yesterday_date
+          OR (s.last_completed_at AT TIME ZONE v_user_tz)::DATE < v_ended_date
         )
     LOOP
       -- Preserve previous streak count and timestamp for 1-day restoration
@@ -108,10 +127,10 @@ BEGIN
           updated_at = NOW()
       WHERE id = v_streak.id;
 
-      v_reset_count := v_reset_count + 1;
+      v_total_streaks_reset := v_total_streaks_reset + 1;
     END LOOP;
 
-    -- Clear expired broken streaks older than 1 day (24 hours)
+    -- 3. Clear expired broken streaks older than 1 day (24 hours)
     UPDATE streaks
     SET broken_streak = NULL,
         broken_at = NULL
@@ -119,16 +138,30 @@ BEGIN
       AND broken_at IS NOT NULL
       AND broken_at < (NOW() - INTERVAL '1 day');
 
+    -- 4. Credit accumulated Cosmic Energy to profile and record last_eod_date
+    UPDATE profiles
+    SET cosmic_energy = cosmic_energy + v_total_energy_earned,
+        last_eod_date = v_ended_date
+    WHERE id = v_user.id;
+
+    v_total_energy_distributed := v_total_energy_distributed + v_total_energy_earned;
+    v_users_processed := v_users_processed + 1;
+
   END LOOP;
 
   RETURN jsonb_build_object(
     'success', true,
-    'tasks_completed', v_completed_count,
-    'energy_awarded', v_total_energy_earned,
-    'streaks_broken', v_reset_count
+    'users_processed', v_users_processed,
+    'tasks_rewarded', v_total_tasks_completed,
+    'energy_awarded', v_total_energy_distributed,
+    'streaks_broken', v_total_streaks_reset
   );
 END;
 $$;
+
+-- Restrict execution permissions: only postgres and service_role (your cron job) can invoke this function
+REVOKE EXECUTE ON FUNCTION process_end_of_day_catalyst() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION process_end_of_day_catalyst() TO postgres, service_role;
 
 -- 4. Database Function: Restore Task Streak Using Cosmic Energy
 CREATE OR REPLACE FUNCTION restore_task_streak(p_task_id UUID)
@@ -221,3 +254,26 @@ BEGIN
   );
 END;
 $$;
+
+-- Permissions: authenticated users can restore their own streaks (SECURITY DEFINER uses auth.uid() internally)
+REVOKE EXECUTE ON FUNCTION restore_task_streak(UUID) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION restore_task_streak(UUID) TO authenticated;
+
+-- 5. Cron Job: Run process_end_of_day_catalyst every hour at minute 0
+-- Requires pg_cron extension (enabled by default in Supabase)
+-- If pg_cron is not available, this will fail silently - you can schedule via Supabase Dashboard instead.
+DO $$
+BEGIN
+  -- Remove existing schedule if any
+  PERFORM cron.unschedule('catalyst_end_of_day_hourly');
+EXCEPTION WHEN OTHERS THEN
+  -- Ignore if job doesn't exist
+  NULL;
+END;
+$$;
+
+SELECT cron.schedule(
+  'catalyst_end_of_day_hourly',
+  '0 * * * *',  -- Every hour at minute 0
+  'SELECT process_end_of_day_catalyst();'
+);

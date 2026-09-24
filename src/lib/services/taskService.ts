@@ -288,7 +288,6 @@ export const taskService = {
             const newStreak = !wasCompleted
               ? currentStreakData.current_streak + 1
               : Math.max(0, currentStreakData.current_streak - 1);
-            const newMax = Math.max(currentStreakData.max_streak, newStreak);
             const lastCompleted = !wasCompleted
               ? new Date().toISOString()
               : newStreak > 0
@@ -299,7 +298,6 @@ export const taskService = {
               .from("streaks")
               .update({
                 current_streak: newStreak,
-                max_streak: newMax,
                 last_completed_at: lastCompleted,
                 updated_at: new Date().toISOString(),
               })
@@ -337,11 +335,9 @@ export const taskService = {
     let updatedStreak: Streak;
     if (!wasCompleted) {
       const newStreak = item.streak.current_streak + 1;
-      const newMax = Math.max(item.streak.max_streak, newStreak);
       updatedStreak = {
         ...item.streak,
         current_streak: newStreak,
-        max_streak: newMax,
         last_completed_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -545,7 +541,6 @@ export const taskService = {
     const restoredStreak: Streak = {
       ...item.streak,
       current_streak: status.targetStreak,
-      max_streak: Math.max(item.streak.max_streak, status.targetStreak),
       broken_streak: null,
       broken_at: null,
       last_completed_at: new Date().toISOString(),
@@ -560,21 +555,8 @@ export const taskService = {
   },
 
   async triggerMidnightEnforcement(): Promise<{ resetTasks: string[]; count: number; energyAwarded: number }> {
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase = createClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-
-        if (user) {
-          await supabase.rpc("process_end_of_day_catalyst", { target_user_id: user.id });
-        }
-      } catch (e) {
-        console.warn("Supabase end of day catalyst RPC error:", e);
-      }
-    }
-
+    // Note: In Supabase mode, process_end_of_day_catalyst runs exclusively on the database via hourly cron.
+    // This method is only used for local guest fallback simulation.
     const list = getLocalStore();
     const resetTasks: string[] = [];
     let totalEarnedEnergy = 0;

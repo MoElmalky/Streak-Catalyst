@@ -9,6 +9,7 @@ const DEFAULT_GUEST_PROFILE: Profile = {
   email: "guest@catalyst.local",
   timezone: "UTC",
   cosmic_energy: 120, // Initial balance so guest user can restore streaks right away
+  last_eod_date: null,
   created_at: new Date().toISOString(),
 };
 
@@ -119,6 +120,7 @@ export const profileService = {
               email: data.email || user.email || "",
               timezone: data.timezone || this.getLocalTimezone(),
               cosmic_energy: Number(data.cosmic_energy || 0),
+              last_eod_date: data.last_eod_date || null,
               created_at: data.created_at || new Date().toISOString(),
             };
           }
